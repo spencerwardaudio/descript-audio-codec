@@ -255,6 +255,48 @@ class ResidualVectorQuantize(nn.Module):
         return z_q, torch.cat(z_p, dim=1), torch.stack(codes, dim=1)
 
 
+class FiniteScalarQuantize(nn.Module):
+    """
+    Multi-dimensional Finite Scalar Quantization (FSQ).
+
+    Wraps ``vector_quantize_pytorch.FSQ`` and adapts it to DAC's [B, D, T]
+    tensor convention.  FSQ applies bounded scalar quantization per dimension
+    using Straight-Through Estimation — no commitment loss, no codebook decay.
+
+    Parameters
+    ----------
+    levels : list[int]
+        Discrete levels per FSQ dimension, e.g. [8, 8, 8, 8, 5, 5, 5, 5].
+        len(levels) must match the number of channels fed into this module.
+
+    References
+    ----------
+    Mentzer et al., "Finite Scalar Quantization: VQ-VAE Made Simple",
+    https://arxiv.org/abs/2309.15505
+    """
+
+    def __init__(self, levels: list = [8, 8, 8, 8, 5, 5, 5, 5]):
+        super().__init__()
+        from vector_quantize_pytorch import FSQ as _FSQ
+        self.fsq = _FSQ(levels=levels)
+        self.fsq_dim = len(levels)
+
+    def forward(self, z: torch.Tensor):
+        """Quantize [B x D x T] input with FSQ.
+
+        Returns
+        -------
+        z_q : Tensor[B x D x T]
+            Quantized output (straight-through gradient in backward pass).
+        indices : Tensor[B x T]
+            Flat codebook index for each frame.
+        """
+        z_perm = z.permute(0, 2, 1)             # [B, T, D]
+        z_q_perm, indices = self.fsq(z_perm)    # [B, T, D], [B, T]
+        z_q = z_q_perm.permute(0, 2, 1)         # [B, D, T]
+        return z_q, indices
+
+
 if __name__ == "__main__":
     rvq = ResidualVectorQuantize(quantizer_dropout=True)
     x = torch.randn(16, 512, 80)

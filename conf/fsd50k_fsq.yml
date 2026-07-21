@@ -1,0 +1,81 @@
+# fsd50k_fsq.yml — DAC-FSQ training config on FSD50K at 24 kHz
+#
+# Apples-to-apples with HiFiCodec / Encodec / Q2D2 (all 24 kHz in this project).
+# Strides [2,4,8,8] → hop=512 → 46.9 tokens/sec @ 24 kHz.
+# FSQ levels [8,8,8,8,5,5,5,5] → 8^4 × 5^4 = 2,560,000 entries → ~1.0 kbps.
+
+$include:
+  - conf/base.yml
+
+# ── Model ─────────────────────────────────────────────────────────────────────
+DAC_FSQ.sample_rate: 24000
+DAC_FSQ.encoder_dim: 64
+DAC_FSQ.encoder_rates: [2, 4, 8, 8]
+DAC_FSQ.decoder_dim: 1536
+DAC_FSQ.decoder_rates: [8, 8, 4, 2]
+DAC_FSQ.fsq_levels: [8, 8, 8, 8, 5, 5, 5, 5]
+
+# ── Discriminator ─────────────────────────────────────────────────────────────
+Discriminator.sample_rate: 24000
+Discriminator.rates: []
+Discriminator.periods: [2, 3, 5, 7, 11]
+Discriminator.fft_sizes: [2048, 1024, 512]
+
+# ── Training schedule (~50 epochs on FSD50K ~10k clips, batch=12, dur=0.38s) ─
+batch_size: 12
+val_batch_size: 12
+num_workers: 4
+num_iters: 100000
+valid_freq: 1000
+sample_freq: 5000
+save_iters: [10000, 50000, 100000]
+
+# ── Loss — FSQ has no commitment or codebook terms ────────────────────────────
+lambdas:
+  mel/loss: 15.0
+  adv/feat_loss: 2.0
+  adv/gen_loss: 1.0
+
+# ── Data — FSD50K CSV filelists (same as Q2D2; paths relative to project root) ─
+# Run train_dac_fsq_fsd50k.sh from the project root for relative paths to resolve.
+train/build_dataset.filelist: datasets/fsd50k_train.csv
+val/build_dataset.filelist: datasets/fsd50k_val.csv
+
+# ── AudioDataset ──────────────────────────────────────────────────────────────
+train/AudioDataset.duration: 0.38
+train/AudioDataset.n_examples: 10000000
+val/AudioDataset.duration: 5.0
+val/AudioDataset.n_examples: 250
+
+# ── Optimiser ─────────────────────────────────────────────────────────────────
+AdamW.betas: [0.8, 0.99]
+AdamW.lr: 0.0001
+ExponentialLR.gamma: 0.999996
+
+# ── Transforms ────────────────────────────────────────────────────────────────
+build_transform.preprocess:
+  - Identity
+build_transform.augment_prob: 0.0
+build_transform.augment:
+  - Identity
+build_transform.postprocess:
+  - VolumeNorm
+  - RescaleAudio
+  - ShiftPhase
+
+# ── Mel loss (multi-scale; null fmax = Nyquist, safe for 24 kHz) ─────────────
+MelSpectrogramLoss.n_mels: [5, 10, 20, 40, 80, 160, 320]
+MelSpectrogramLoss.window_lengths: [32, 64, 128, 256, 512, 1024, 2048]
+MelSpectrogramLoss.mel_fmin: [0, 0, 0, 0, 0, 0, 0]
+MelSpectrogramLoss.mel_fmax: [null, null, null, null, null, null, null]
+MelSpectrogramLoss.pow: 1.0
+MelSpectrogramLoss.clamp_eps: 1.0e-5
+MelSpectrogramLoss.mag_weight: 0.0
+MultiScaleSTFTLoss.window_lengths: [2048, 512]
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
+amp: false
+device: cuda
+seed: 0
+val_idx: [0, 1, 2, 3, 4, 5, 6, 7]
+VolumeNorm.db: [const, -16]

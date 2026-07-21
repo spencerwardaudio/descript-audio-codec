@@ -13,6 +13,7 @@ from dac.nn.layers import Snake1d
 from dac.nn.layers import WNConv1d
 from dac.nn.layers import WNConvTranspose1d
 from dac.nn.quantize import ResidualVectorQuantize
+from dac.nn.quantize import FiniteScalarQuantize
 
 
 def init_weights(m):
@@ -311,6 +312,119 @@ class DAC(BaseModel, CodecMixin):
             audio_data, n_quantizers
         )
 
+        x = self.decode(z)
+        return {
+            "audio": x[..., :length],
+            "z": z,
+            "codes": codes,
+            "latents": latents,
+            "vq/commitment_loss": commitment_loss,
+            "vq/codebook_loss": codebook_loss,
+        }
+
+
+class DAC_FSQ(BaseModel, CodecMixin):
+    """DAC variant that replaces Residual Vector Quantization with multi-dimensional
+    Finite Scalar Quantization (FSQ).
+
+    Key differences vs DAC:
+    - Single flat FSQ index per frame (no RVQ residual codebooks).
+    - No commitment loss or codebook loss — FSQ uses straight-through estimation.
+    - Default sample_rate=24000 for apples-to-apples comparison with other 24 kHz
+      codecs in the project (HiFiCodec, Encodec, Q2D2).
+    - Projection layers bridge latent_dim <-> len(fsq_levels).
+
+    Token frame rate: strides [2,4,8,8] → hop=512 → 46.9 tokens/sec @ 24 kHz.
+    Bitrate with levels=[8,8,8,8,5,5,5,5]: ~1.0 kbps.
+    """
+
+    def __init__(
+        self,
+        encoder_dim: int = 64,
+        encoder_rates: List[int] = [2, 4, 8, 8],
+        latent_dim: int = None,
+        decoder_dim: int = 1536,
+        decoder_rates: List[int] = [8, 8, 4, 2],
+        fsq_levels: List[int] = [8, 8, 8, 8, 5, 5, 5, 5],
+        sample_rate: int = 24000,
+    ):
+        super().__init__()
+
+        self.encoder_dim = encoder_dim
+        self.encoder_rates = encoder_rates
+        self.decoder_dim = decoder_dim
+        self.decoder_rates = decoder_rates
+        self.sample_rate = sample_rate
+        self.fsq_levels = fsq_levels
+
+        if latent_dim is None:
+            latent_dim = encoder_dim * (2 ** len(encoder_rates))
+        self.latent_dim = latent_dim
+
+        self.hop_length = np.prod(encoder_rates)
+        self.encoder = Encoder(encoder_dim, encoder_rates, latent_dim)
+
+        fsq_dim = len(fsq_levels)
+        self.quantizer_proj_in = WNConv1d(latent_dim, fsq_dim, kernel_size=1)
+        self.quantizer_proj_out = WNConv1d(fsq_dim, latent_dim, kernel_size=1)
+        self.quantizer = FiniteScalarQuantize(levels=fsq_levels)
+
+        self.decoder = Decoder(latent_dim, decoder_dim, decoder_rates)
+        self.apply(init_weights)
+        self.delay = self.get_delay()
+
+    def preprocess(self, audio_data, sample_rate):
+        if sample_rate is None:
+            sample_rate = self.sample_rate
+        assert sample_rate == self.sample_rate
+
+        length = audio_data.shape[-1]
+        right_pad = math.ceil(length / self.hop_length) * self.hop_length - length
+        audio_data = nn.functional.pad(audio_data, (0, right_pad))
+        return audio_data
+
+    def encode(
+        self,
+        audio_data: torch.Tensor,
+        n_quantizers: int = None,  # unused; kept for API compatibility
+    ):
+        """Encode audio and return FSQ-quantized latent.
+
+        Returns
+        -------
+        z_out : Tensor[B x latent_dim x T]   quantized, projected back to latent_dim
+        codes : Tensor[B x 1 x T]            flat FSQ indices (single codebook)
+        latents : Tensor[B x fsq_dim x T]    pre-quantization FSQ features
+        commitment_loss : Tensor[1]          always zero (FSQ has no commitment loss)
+        codebook_loss : Tensor[1]            always zero
+        """
+        z = self.encoder(audio_data)                    # [B, latent_dim, T]
+        z_fsq = self.quantizer_proj_in(z)               # [B, fsq_dim, T]
+        z_q_fsq, indices = self.quantizer(z_fsq)        # [B, fsq_dim, T], [B, T]
+        z_out = self.quantizer_proj_out(z_q_fsq)        # [B, latent_dim, T]
+
+        commitment_loss = torch.zeros(1, device=audio_data.device)
+        codebook_loss = torch.zeros(1, device=audio_data.device)
+        codes = indices.unsqueeze(1)  # [B, 1, T] — single implicit codebook
+        latents = z_fsq
+        return z_out, codes, latents, commitment_loss, codebook_loss
+
+    def decode(self, z: torch.Tensor):
+        return self.decoder(z)
+
+    def forward(
+        self,
+        audio_data: torch.Tensor,
+        sample_rate: int = None,
+        n_quantizers: int = None,
+    ):
+        """Model forward pass — returns the same dict keys as DAC for train loop
+        compatibility."""
+        length = audio_data.shape[-1]
+        audio_data = self.preprocess(audio_data, sample_rate)
+        z, codes, latents, commitment_loss, codebook_loss = self.encode(
+            audio_data, n_quantizers
+        )
         x = self.decode(z)
         return {
             "audio": x[..., :length],
