@@ -412,7 +412,8 @@ def train(
     accel: ml.Accelerator,
     seed: int = 0,
     save_path: str = "ckpt",
-    num_iters: int = 100000,
+    training_epochs: int = 50,
+    num_iters: int = None,
     save_iters: list = [10000, 50000, 100000],
     sample_freq: int = 5000,
     valid_freq: int = 1000,
@@ -437,6 +438,22 @@ def train(
         writer=writer, log_file=f"{save_path}/log.txt", rank=accel.local_rank
     )
 
+    state = load(args, accel, tracker, save_path)
+    train_dataloader = accel.prepare_dataloader(
+        state.train_data,
+        start_idx=state.tracker.step * batch_size,
+        num_workers=num_workers,
+        batch_size=batch_size,
+        collate_fn=state.train_data.collate,
+    )
+    steps_per_epoch = len(train_dataloader)
+    if num_iters is None:
+        num_iters = training_epochs * steps_per_epoch
+    tracker.print(
+        f"Training DAC-FSQ for {training_epochs} epochs "
+        f"({num_iters} iterations, {steps_per_epoch} steps/epoch)"
+    )
+
     # ── W&B init (rank-0 only) ────────────────────────────────────────────────
     global _wandb_run
     if WANDB_AVAILABLE and accel.local_rank == 0:
@@ -444,7 +461,9 @@ def train(
             project=os.environ.get("WANDB_PROJECT", "dac-fsq-fsd50k"),
             name=os.environ.get("WANDB_NAME", "dac-fsq-run"),
             config={
+                "training_epochs": training_epochs,
                 "num_iters": num_iters,
+                "steps_per_epoch": steps_per_epoch,
                 "lambdas": lambdas,
                 "save_path": save_path,
                 "batch_size": batch_size,
@@ -455,14 +474,6 @@ def train(
             f"W&B run: {_wandb_run.url if hasattr(_wandb_run, 'url') else 'initialized'}"
         )
 
-    state = load(args, accel, tracker, save_path)
-    train_dataloader = accel.prepare_dataloader(
-        state.train_data,
-        start_idx=state.tracker.step * batch_size,
-        num_workers=num_workers,
-        batch_size=batch_size,
-        collate_fn=state.train_data.collate,
-    )
     train_dataloader = get_infinite_loader(train_dataloader)
     val_dataloader = accel.prepare_dataloader(
         state.val_data,

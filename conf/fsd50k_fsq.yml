@@ -21,11 +21,11 @@ Discriminator.rates: []
 Discriminator.periods: [2, 3, 5, 7, 11]
 Discriminator.fft_sizes: [2048, 1024, 512]
 
-# ── Training schedule (~50 epochs on FSD50K ~10k clips, batch=12, dur=0.38s) ─
+# ── Training schedule (explicit 50 epochs on FSD50K) ────────────────────────
 batch_size: 12
 val_batch_size: 12
 num_workers: 4
-num_iters: 100000
+training_epochs: 50
 valid_freq: 1000
 sample_freq: 5000
 save_iters: [10000, 50000, 100000]
