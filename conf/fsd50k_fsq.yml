@@ -24,9 +24,9 @@ Discriminator.fft_sizes: [2048, 1024, 512]
 # ── Training schedule (explicit 50 epochs on FSD50K) ────────────────────────
 batch_size: 8
 val_batch_size: 5
-num_workers: 4
+num_workers: 8
 training_epochs: 50
-valid_freq: 20485  # Every 5 epochs (32772 samples / 8 batch * 5 epochs)
+valid_freq: 5050  # Every 5 epochs (1010 steps × 5)
 sample_freq: 5000
 save_iters: [10000, 50000, 100000]
 
@@ -42,8 +42,8 @@ train/build_dataset.filelist: datasets/fsd50k_train.csv
 val/build_dataset.filelist: datasets/fsd50k_val.csv
 
 # ── AudioDataset ──────────────────────────────────────────────────────────────
-train/AudioDataset.duration: 0.38
-train/AudioDataset.n_examples: 10000000
+train/AudioDataset.duration: 3.0
+train/AudioDataset.n_examples: 8080
 val/AudioDataset.duration: 5.0
 val/AudioDataset.n_examples: 250
 
