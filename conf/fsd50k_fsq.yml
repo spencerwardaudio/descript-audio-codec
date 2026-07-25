@@ -21,12 +21,12 @@ Discriminator.rates: []
 Discriminator.periods: [2, 3, 5, 7, 11]
 Discriminator.fft_sizes: [2048, 1024, 512]
 
-# ── Training schedule (explicit 50 epochs on FSD50K) ────────────────────────
+# ── Training schedule (explicit 50 epochs on FSD50K, limited samples) ────────
 batch_size: 12
 val_batch_size: 5
 num_workers: 12
 training_epochs: 50
-valid_freq: 5050  # Every 5 epochs (1010 steps × 5)
+valid_freq: 5000  # Every 5 epochs (1000 steps × 5)
 sample_freq: 5000
 save_iters: [10000, 50000, 100000]
 
@@ -44,14 +44,14 @@ val/build_dataset.filelist: datasets/fsd50k_val.csv
 # ── SimpleAudioDataset (fast CSV loading compatible with num_workers > 0) ─────
 train/build_dataset.use_simple_dataset: true
 train/build_dataset.duration: 3.0
-train/build_dataset.n_examples: 8080
+train/build_dataset.n_examples: 12000  # Limited training (37% of dataset)
 val/build_dataset.use_simple_dataset: true
 val/build_dataset.duration: 5.0
 val/build_dataset.n_examples: 250
 
 # ── AudioDataset (legacy, slow with multiprocess - kept for folder-based loading) ──
 train/AudioDataset.duration: 3.0
-train/AudioDataset.n_examples: 8080
+train/AudioDataset.n_examples: 12000  # Limited training (37% of dataset)
 val/AudioDataset.duration: 5.0
 val/AudioDataset.n_examples: 250
 
