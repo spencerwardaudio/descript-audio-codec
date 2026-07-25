@@ -437,6 +437,9 @@ def train(
     tracker = Tracker(
         writer=writer, log_file=f"{save_path}/log.txt", rank=accel.local_rank
     )
+    tracker.print(f"Accelerator device: {accel.device}")
+    tracker.print(f"Accelerator amp: {accel.amp}")
+    tracker.print(f"torch.cuda.is_available(): {torch.cuda.is_available()}")
 
     state = load(args, accel, tracker, save_path)
     train_dataloader = accel.prepare_dataloader(
