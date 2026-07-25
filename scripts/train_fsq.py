@@ -190,6 +190,33 @@ def load(
     generator = accel.prepare_model(generator)
     discriminator = accel.prepare_model(discriminator)
 
+    # Debug: Check if models are actually on GPU after prepare_model
+    try:
+        gen_device = next(generator.parameters()).device
+        disc_device = next(discriminator.parameters()).device
+        tracker.print(f"Generator device after prepare_model: {gen_device}")
+        tracker.print(f"Discriminator device after prepare_model: {disc_device}")
+    except StopIteration:
+        tracker.print("WARNING: Could not determine model device (no parameters)")
+
+    # Explicitly move to device if prepare_model didn't do it
+    if accel.device != 'cpu':
+        generator = generator.to(accel.device)
+        discriminator = discriminator.to(accel.device)
+        tracker.print(f"Explicitly moved models to {accel.device}")
+
+    # Verify models are on the correct device
+    gen_device_final = next(generator.parameters()).device
+    disc_device_final = next(discriminator.parameters()).device
+    tracker.print(f"Generator final device: {gen_device_final}")
+    tracker.print(f"Discriminator final device: {disc_device_final}")
+    
+    # Assert GPU placement if CUDA is requested
+    if accel.device == 'cuda':
+        assert str(gen_device_final).startswith('cuda'), f"Generator not on CUDA! Device: {gen_device_final}"
+        assert str(disc_device_final).startswith('cuda'), f"Discriminator not on CUDA! Device: {disc_device_final}"
+        tracker.print("✓ GPU placement verified")
+
     with argbind.scope(args, "generator"):
         optimizer_g = AdamW(generator.parameters(), use_zero=accel.use_ddp)
         scheduler_g = ExponentialLR(optimizer_g)
