@@ -139,6 +139,11 @@ class SimpleAudioDataset(torch.utils.data.Dataset):
         return self.n_examples
     
     def __getitem__(self, index: int):
+        # Debug: Log every 100th sample to confirm loading is working
+        if index % 100 == 0:
+            import sys
+            print(f"[DataLoader] Loading sample {index}/{self.n_examples}", file=sys.stderr, flush=True)
+        
         # Wrap around if n_examples > len(file_list)
         file_idx = index % len(self.file_list)
         audio_path = self.file_list[file_idx]
@@ -375,8 +380,10 @@ def load(
     sample_rate = accel.unwrap(generator).sample_rate
     with argbind.scope(args, "train"):
         train_data = build_dataset(sample_rate)
+        tracker.print(f"Train dataset: {type(train_data).__name__}, length={len(train_data)}")
     with argbind.scope(args, "val"):
         val_data = build_dataset(sample_rate)
+        tracker.print(f"Val dataset: {type(val_data).__name__}, length={len(val_data)}")
 
     waveform_loss = losses.L1Loss()
     stft_loss = losses.MultiScaleSTFTLoss()
@@ -603,8 +610,20 @@ def train(
     tracker.print(f"Accelerator device: {accel.device}")
     tracker.print(f"Accelerator amp: {accel.amp}")
     tracker.print(f"torch.cuda.is_available(): {torch.cuda.is_available()}")
+    
+    # Baseline GPU memory usage (should be ~0 MiB before loading models)
+    if torch.cuda.is_available():
+        baseline_mem = torch.cuda.memory_allocated() / 1024**2
+        tracker.print(f"Baseline GPU memory: {baseline_mem:.1f} MiB")
 
     state = load(args, accel, tracker, save_path)
+    
+    # Assert GPU memory increased after loading models
+    if torch.cuda.is_available():
+        model_mem = torch.cuda.memory_allocated() / 1024**2
+        tracker.print(f"GPU memory after models loaded: {model_mem:.1f} MiB")
+        assert model_mem > 1000, f"Models not on GPU! Only {model_mem:.1f} MiB allocated (expected >1000 MiB)"
+        tracker.print(f"✓ GPU memory check passed ({model_mem:.1f} MiB allocated)")
     train_dataloader = accel.prepare_dataloader(
         state.train_data,
         start_idx=state.tracker.step * batch_size,
@@ -621,6 +640,40 @@ def train(
         f"Training DAC-FSQ for {training_epochs} epochs "
         f"({num_iters} iterations, {steps_per_epoch} steps/epoch)"
     )
+    
+    # ── Test first batch load (fail fast if DataLoader hangs) ──────────────────
+    tracker.print("Testing first batch load (timeout: 60s)...")
+    import time
+    import signal
+    
+    def timeout_handler(signum, frame):
+        raise TimeoutError("DataLoader hang detected: first batch took >60s")
+    
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(60)  # 60 second timeout
+    
+    try:
+        train_dataloader_test = get_infinite_loader(train_dataloader)
+        start_time = time.time()
+        test_batch = next(train_dataloader_test)
+        signal.alarm(0)  # Cancel alarm
+        elapsed = time.time() - start_time
+        tracker.print(f"✓ First batch loaded successfully in {elapsed:.1f}s")
+        
+        if torch.cuda.is_available():
+            batch_mem = torch.cuda.memory_allocated() / 1024**2
+            tracker.print(f"GPU memory after first batch: {batch_mem:.1f} MiB")
+            if batch_mem <= model_mem:
+                tracker.print(f"⚠ WARNING: GPU memory unchanged ({batch_mem:.1f} MiB), batch may not be on GPU")
+            else:
+                tracker.print(f"✓ Batch loaded to GPU successfully (delta: +{batch_mem-model_mem:.1f} MiB)")
+    except TimeoutError as e:
+        tracker.print(f"❌ FAILED: {e}")
+        tracker.print("Possible causes: num_workers too high, slow file I/O, or dataset __getitem__ hang")
+        raise
+    except Exception as e:
+        tracker.print(f"❌ FAILED to load first batch: {e}")
+        raise
 
     # ── W&B init (rank-0 only) ────────────────────────────────────────────────
     global _wandb_run
