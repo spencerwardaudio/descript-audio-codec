@@ -94,6 +94,7 @@ class SimpleAudioDataset(torch.utils.data.Dataset):
     
     Unlike AudioLoader (which takes ~4s to initialize and repeats per worker),
     this reads the CSV once and loads audio on-demand in __getitem__.
+    Uses simple random cropping instead of expensive salient_excerpt() for speed.
     Modeled on Q2D2's VocosDataset but adapted for DAC-FSQ's AudioSignal interface.
     
     Parameters
@@ -111,7 +112,7 @@ class SimpleAudioDataset(torch.utils.data.Dataset):
     train : bool, optional
         Whether this is a training dataset (random crops) or validation (deterministic), by default True
     loudness_cutoff : float, optional
-        Loudness threshold for salient excerpt detection, by default -40
+        UNUSED - kept for API compatibility (salient_excerpt removed for speed)
     """
     
     def __init__(
@@ -142,30 +143,37 @@ class SimpleAudioDataset(torch.utils.data.Dataset):
         file_idx = index % len(self.file_list)
         audio_path = self.file_list[file_idx]
         
-        # Load audio using AudioSignal's salient excerpt detection
+        # Load audio - use simple random crop instead of expensive salient_excerpt
         try:
-            if self.train:
-                # Random salient excerpt for training
-                state = util.random_state(index)
-                signal = AudioSignal.salient_excerpt(
-                    audio_path,
-                    duration=self.duration,
-                    state=state,
-                    loudness_cutoff=self.loudness_cutoff,
-                )
-            else:
-                # Deterministic first excerpt for validation
-                signal = AudioSignal(audio_path, duration=self.duration, offset=0)
+            # Load full audio file
+            signal = AudioSignal(audio_path)
+            signal = signal.resample(self.sample_rate).to_mono()
+            
+            # Random crop for training, deterministic for validation
+            if signal.audio_data.shape[-1] > self.num_samples:
+                if self.train:
+                    # Random crop
+                    state = util.random_state(index)
+                    max_start = signal.audio_data.shape[-1] - self.num_samples
+                    start = int(state.random() * max_start)
+                    signal.audio_data = signal.audio_data[..., start:start + self.num_samples]
+                else:
+                    # Deterministic first crop
+                    signal.audio_data = signal.audio_data[..., :self.num_samples]
+            elif signal.audio_data.shape[-1] < self.num_samples:
+                # Pad if too short
+                signal = signal.zero_pad_to(self.num_samples)
+                
         except Exception as e:
             # Fallback to zeros if file loading fails
             signal = AudioSignal.zeros(self.duration, self.sample_rate, 1)
         
-        # Ensure correct sample rate and duration
-        signal = signal.resample(self.sample_rate).to_mono()
-        if signal.duration < self.duration:
-            signal = signal.zero_pad_to(self.num_samples)
-        elif signal.audio_data.shape[-1] > self.num_samples:
-            signal.audio_data = signal.audio_data[..., :self.num_samples]
+        # Ensure exact duration
+        if signal.audio_data.shape[-1] != self.num_samples:
+            if signal.audio_data.shape[-1] > self.num_samples:
+                signal.audio_data = signal.audio_data[..., :self.num_samples]
+            else:
+                signal = signal.zero_pad_to(self.num_samples)
         
         # Store metadata
         signal.metadata["path"] = audio_path
