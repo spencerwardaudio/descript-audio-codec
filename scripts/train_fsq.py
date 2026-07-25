@@ -335,6 +335,7 @@ def load(
 ):
     generator, g_extra = None, {}
     discriminator, d_extra = None, {}
+    expected_mem_mib = 0.0  # Will be calculated and returned
 
     if resume:
         kwargs = {
@@ -532,7 +533,7 @@ def load(
     mel_loss = losses.MelSpectrogramLoss()
     gan_loss = losses.GANLoss(discriminator)
 
-    return State(
+    state = State(
         generator=generator,
         optimizer_g=optimizer_g,
         scheduler_g=scheduler_g,
@@ -547,6 +548,9 @@ def load(
         train_data=train_data,
         val_data=val_data,
     )
+    
+    # Return both state and expected memory for validation
+    return state, expected_mem_mib
 
 
 @timer()
@@ -773,7 +777,7 @@ def train(
         baseline_mem = torch.cuda.memory_allocated() / 1024**2
         tracker.print(f"\nBaseline GPU memory: {baseline_mem:.1f} MiB")
 
-    state = load(args, accel, tracker, save_path)
+    state, expected_model_mem = load(args, accel, tracker, save_path)
     
     # Final GPU memory check after all models loaded
     final_mem = 0.0  # Initialize for later reference
@@ -783,23 +787,31 @@ def train(
         tracker.print("=== Final Memory Check ===")
         tracker.print("="*70)
         tracker.print(f"GPU memory after all models loaded: {final_mem:.1f} MiB")
+        tracker.print(f"Expected model memory: {expected_model_mem:.1f} MiB")
+        
+        # Check if at least 80% of expected memory is allocated (allows some tolerance)
+        min_required = expected_model_mem * 0.8
+        tracker.print(f"Minimum required (80% of expected): {min_required:.1f} MiB")
         
         # This should pass if load() succeeded
-        if final_mem < 1000:
+        if final_mem < min_required:
             tracker.print("\n" + "X"*70)
             tracker.print("XXX CRITICAL ERROR: Models not properly loaded to GPU! XXX")
             tracker.print("X"*70)
-            tracker.print(f"Expected: >1000 MiB")
+            tracker.print(f"Expected: {expected_model_mem:.1f} MiB")
+            tracker.print(f"Minimum (80%): {min_required:.1f} MiB")
             tracker.print(f"Actual: {final_mem:.1f} MiB")
+            tracker.print(f"Shortfall: {min_required - final_mem:.1f} MiB")
             tracker.print(f"\nThis means the GPU placement in load() function failed.")
             tracker.print(f"Check the diagnostic output above for the root cause.")
             tracker.print("X"*70)
             raise RuntimeError(
                 f"Models not properly loaded to GPU!\n"
-                f"Expected: >1000 MiB, Got: {final_mem:.1f} MiB\n"
+                f"Expected: {expected_model_mem:.1f} MiB, Got: {final_mem:.1f} MiB\n"
                 f"Check diagnostics above for root cause."
             )
-        tracker.print(f"✓ Final GPU memory check passed ({final_mem:.1f} MiB allocated)")
+        tracker.print(f"\n✓ Final GPU memory check passed ({final_mem:.1f} MiB allocated)")
+        tracker.print(f"  Overhead: {final_mem - expected_model_mem:.1f} MiB ({(final_mem / expected_model_mem - 1) * 100:.1f}% over expected)")
         tracker.print("="*70)
     
     # DataLoader creation with diagnostics
