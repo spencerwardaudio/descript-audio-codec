@@ -711,6 +711,7 @@ def train(
     state = load(args, accel, tracker, save_path)
     
     # Final GPU memory check after all models loaded
+    final_mem = 0.0  # Initialize for later reference
     if torch.cuda.is_available():
         final_mem = torch.cuda.memory_allocated() / 1024**2
         tracker.print(f"\n=== Final Memory Check ===")
@@ -763,10 +764,10 @@ def train(
         if torch.cuda.is_available():
             batch_mem = torch.cuda.memory_allocated() / 1024**2
             tracker.print(f"GPU memory after first batch: {batch_mem:.1f} MiB")
-            if batch_mem <= model_mem:
+            if batch_mem <= final_mem:
                 tracker.print(f"⚠ WARNING: GPU memory unchanged ({batch_mem:.1f} MiB), batch may not be on GPU")
             else:
-                tracker.print(f"✓ Batch loaded to GPU successfully (delta: +{batch_mem-model_mem:.1f} MiB)")
+                tracker.print(f"✓ Batch loaded to GPU successfully (delta: +{batch_mem-final_mem:.1f} MiB)")
     except TimeoutError as e:
         tracker.print(f"❌ FAILED: {e}")
         tracker.print("Possible causes: num_workers too high, slow file I/O, or dataset __getitem__ hang")
