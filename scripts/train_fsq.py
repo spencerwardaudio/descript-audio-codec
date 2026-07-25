@@ -327,24 +327,93 @@ def load(
 
     tracker.print(generator)
     tracker.print(discriminator)
+    
+    # Count parameters and calculate expected memory footprint
+    tracker.print("\n=== Model Parameter Analysis ===")
+    gen_params = sum(p.numel() for p in generator.parameters())
+    disc_params = sum(p.numel() for p in discriminator.parameters())
+    total_params = gen_params + disc_params
+    # float32 = 4 bytes per parameter
+    expected_mem_mib = (total_params * 4) / (1024**2)
+    tracker.print(f"Generator parameters: {gen_params:,} ({gen_params * 4 / 1024**2:.1f} MiB)")
+    tracker.print(f"Discriminator parameters: {disc_params:,} ({disc_params * 4 / 1024**2:.1f} MiB)")
+    tracker.print(f"Total parameters: {total_params:,} ({expected_mem_mib:.1f} MiB expected)")
+    
+    # Check initial device placement
+    gen_device_init = next(generator.parameters()).device
+    disc_device_init = next(discriminator.parameters()).device
+    tracker.print(f"\nGenerator initial device: {gen_device_init}")
+    tracker.print(f"Discriminator initial device: {disc_device_init}")
 
     # CRITICAL FIX: Move to GPU BEFORE prepare_model (prepare_model wrapping prevents .to() from working)
     if accel.device != 'cpu':
-        tracker.print(f"Moving models to {accel.device} BEFORE prepare_model...")
+        tracker.print(f"\n=== Moving Models to {accel.device} ===")
+        mem_before_move = torch.cuda.memory_allocated() / 1024**2
+        tracker.print(f"GPU memory before .to(): {mem_before_move:.1f} MiB")
+        
+        # Try moving to GPU
         generator = generator.to(accel.device)
         discriminator = discriminator.to(accel.device)
         
-        # Verify move succeeded
+        # Check memory IMMEDIATELY after .to() - this is the critical diagnostic
+        mem_after_move = torch.cuda.memory_allocated() / 1024**2
+        mem_delta = mem_after_move - mem_before_move
+        tracker.print(f"GPU memory after .to(): {mem_after_move:.1f} MiB (delta: +{mem_delta:.1f} MiB)")
+        
+        # Verify parameter devices
         gen_device_before = next(generator.parameters()).device
         disc_device_before = next(discriminator.parameters()).device
-        tracker.print(f"Generator device before prepare_model: {gen_device_before}")
-        tracker.print(f"Discriminator device before prepare_model: {disc_device_before}")
+        tracker.print(f"Generator parameter device: {gen_device_before}")
+        tracker.print(f"Discriminator parameter device: {disc_device_before}")
+        
+        # Check buffer devices (batch norm stats, etc.)
+        gen_buffers = list(generator.buffers())
+        disc_buffers = list(discriminator.buffers())
+        if gen_buffers:
+            gen_buffer_device = gen_buffers[0].device
+            tracker.print(f"Generator buffer device: {gen_buffer_device}")
+        if disc_buffers:
+            disc_buffer_device = disc_buffers[0].device
+            tracker.print(f"Discriminator buffer device: {disc_buffer_device}")
+        
+        # Assert device metadata is correct
         assert str(gen_device_before).startswith('cuda'), f"Failed to move generator to GPU: {gen_device_before}"
         assert str(disc_device_before).startswith('cuda'), f"Failed to move discriminator to GPU: {disc_device_before}"
+        
+        # CRITICAL: Assert memory was actually allocated
+        if mem_delta < expected_mem_mib * 0.5:  # Should allocate at least 50% of expected
+            tracker.print(f"\n✗ WARNING: .to() did not allocate expected memory!")
+            tracker.print(f"  Expected: ~{expected_mem_mib:.1f} MiB")
+            tracker.print(f"  Actual delta: {mem_delta:.1f} MiB")
+            tracker.print(f"\n  Attempting alternative: .cuda() method...")
+            
+            # Try .cuda() as alternative
+            generator = generator.cuda()
+            discriminator = discriminator.cuda()
+            mem_after_cuda = torch.cuda.memory_allocated() / 1024**2
+            mem_delta_cuda = mem_after_cuda - mem_before_move
+            tracker.print(f"  GPU memory after .cuda(): {mem_after_cuda:.1f} MiB (delta: +{mem_delta_cuda:.1f} MiB)")
+            
+            if mem_delta_cuda < expected_mem_mib * 0.5:
+                raise RuntimeError(
+                    f"Cannot move models to GPU! Tried .to() and .cuda(), neither allocated memory.\n"
+                    f"Expected: {expected_mem_mib:.1f} MiB, Got: {mem_delta_cuda:.1f} MiB\n"
+                    f"Models may be empty or initialized with meta device."
+                )
+            else:
+                tracker.print(f"  ✓ .cuda() worked! Using .cuda() instead of .to()")
+        else:
+            tracker.print(f"✓ Memory allocation successful ({mem_delta:.1f} MiB allocated)")
 
     # Now wrap with prepare_model (should preserve GPU placement)
+    tracker.print(f"\n=== Wrapping with prepare_model ===")
+    mem_before_prepare = torch.cuda.memory_allocated() / 1024**2 if torch.cuda.is_available() else 0
+    
     generator = accel.prepare_model(generator)
     discriminator = accel.prepare_model(discriminator)
+    
+    mem_after_prepare = torch.cuda.memory_allocated() / 1024**2 if torch.cuda.is_available() else 0
+    tracker.print(f"GPU memory after prepare_model: {mem_after_prepare:.1f} MiB (delta: {mem_after_prepare - mem_before_prepare:+.1f} MiB)")
 
     # Verify models are still on the correct device after prepare_model
     gen_device_final = next(generator.parameters()).device
@@ -356,7 +425,15 @@ def load(
     if accel.device == 'cuda':
         assert str(gen_device_final).startswith('cuda'), f"Generator not on CUDA after prepare_model! Device: {gen_device_final}"
         assert str(disc_device_final).startswith('cuda'), f"Discriminator not on CUDA after prepare_model! Device: {disc_device_final}"
-        tracker.print("✓ GPU placement verified")
+        
+        # Verify memory didn't drop (prepare_model shouldn't move back to CPU)
+        if mem_after_prepare < mem_before_prepare * 0.9:
+            raise RuntimeError(
+                f"prepare_model moved models back to CPU!\n"
+                f"Before: {mem_before_prepare:.1f} MiB, After: {mem_after_prepare:.1f} MiB"
+            )
+        
+        tracker.print("✓ GPU placement verified after prepare_model")
 
     with argbind.scope(args, "generator"):
         optimizer_g = AdamW(generator.parameters(), use_zero=accel.use_ddp)
@@ -611,19 +688,35 @@ def train(
     tracker.print(f"Accelerator amp: {accel.amp}")
     tracker.print(f"torch.cuda.is_available(): {torch.cuda.is_available()}")
     
+    # GPU ping test: ensure basic GPU operations work
+    if torch.cuda.is_available():
+        tracker.print("\n=== GPU Ping Test ===")
+        try:
+            test_tensor = torch.randn(1000, 1000).cuda()
+            result = test_tensor @ test_tensor.T
+            mem_after_ping = torch.cuda.memory_allocated() / 1024**2
+            tracker.print(f"✓ GPU ping successful: allocated {mem_after_ping:.1f} MiB for test tensor")
+            del test_tensor, result
+            torch.cuda.empty_cache()
+            tracker.print(f"✓ GPU memory released, ready for model loading")
+        except Exception as e:
+            tracker.print(f"✗ GPU ping FAILED: {e}")
+            raise RuntimeError(f"GPU is not functional: {e}")
+    
     # Baseline GPU memory usage (should be ~0 MiB before loading models)
     if torch.cuda.is_available():
         baseline_mem = torch.cuda.memory_allocated() / 1024**2
-        tracker.print(f"Baseline GPU memory: {baseline_mem:.1f} MiB")
+        tracker.print(f"\nBaseline GPU memory: {baseline_mem:.1f} MiB")
 
     state = load(args, accel, tracker, save_path)
     
-    # Assert GPU memory increased after loading models
+    # Final GPU memory check after all models loaded
     if torch.cuda.is_available():
-        model_mem = torch.cuda.memory_allocated() / 1024**2
-        tracker.print(f"GPU memory after models loaded: {model_mem:.1f} MiB")
-        assert model_mem > 1000, f"Models not on GPU! Only {model_mem:.1f} MiB allocated (expected >1000 MiB)"
-        tracker.print(f"✓ GPU memory check passed ({model_mem:.1f} MiB allocated)")
+        final_mem = torch.cuda.memory_allocated() / 1024**2
+        tracker.print(f\"\\n=== Final Memory Check ===\")
+        tracker.print(f\"GPU memory after all models loaded: {final_mem:.1f} MiB\")\n        
+        # This should pass if load() succeeded
+        if final_mem < 1000:\n            raise RuntimeError(\n                f\"Models not properly loaded to GPU!\\n\"\n                f\"Expected: >1000 MiB, Got: {final_mem:.1f} MiB\\n\"\n                f\"Check diagnostics above for root cause.\"\n            )\n        tracker.print(f\"\u2713 Final GPU memory check passed ({final_mem:.1f} MiB allocated)\")
     train_dataloader = accel.prepare_dataloader(
         state.train_data,
         start_idx=state.tracker.step * batch_size,
