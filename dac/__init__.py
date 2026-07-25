@@ -6,7 +6,7 @@ __model_version__ = "latest"
 import audiotools
 
 audiotools.ml.BaseModel.INTERN += ["dac.**"]
-audiotools.ml.BaseModel.EXTERN += ["einops"]
+audiotools.ml.BaseModel.EXTERN += ["einops", "vector_quantize_pytorch"]
 
 
 from . import nn
