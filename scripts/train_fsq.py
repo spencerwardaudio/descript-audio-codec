@@ -18,6 +18,7 @@ import sys
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import argbind
 import torch
@@ -88,6 +89,109 @@ def get_infinite_loader(dataloader):
             yield batch
 
 
+class SimpleAudioDataset(torch.utils.data.Dataset):
+    """Lightweight CSV-based audio dataset compatible with multiprocess DataLoader.
+    
+    Unlike AudioLoader (which takes ~4s to initialize and repeats per worker),
+    this reads the CSV once and loads audio on-demand in __getitem__.
+    Modeled on Q2D2's VocosDataset but adapted for DAC-FSQ's AudioSignal interface.
+    
+    Parameters
+    ----------
+    filelist : str
+        Path to CSV file with one audio path per line
+    sample_rate : int
+        Target sample rate for resampling
+    duration : float
+        Duration of audio excerpts in seconds
+    n_examples : int
+        Number of examples (dataset length)
+    transform : Callable, optional
+        Transform to apply to audio samples
+    train : bool, optional
+        Whether this is a training dataset (random crops) or validation (deterministic), by default True
+    loudness_cutoff : float, optional
+        Loudness threshold for salient excerpt detection, by default -40
+    """
+    
+    def __init__(
+        self,
+        filelist: str,
+        sample_rate: int,
+        duration: float = 3.0,
+        n_examples: int = 1000,
+        transform: Callable = None,
+        train: bool = True,
+        loudness_cutoff: float = -40,
+    ):
+        with open(filelist) as f:
+            self.file_list = [line.strip() for line in f if line.strip()]
+        self.sample_rate = sample_rate
+        self.duration = duration
+        self.n_examples = n_examples
+        self.transform = transform
+        self.train = train
+        self.loudness_cutoff = loudness_cutoff
+        self.num_samples = int(duration * sample_rate)
+        
+    def __len__(self) -> int:
+        return self.n_examples
+    
+    def __getitem__(self, index: int):
+        # Wrap around if n_examples > len(file_list)
+        file_idx = index % len(self.file_list)
+        audio_path = self.file_list[file_idx]
+        
+        # Load audio using AudioSignal's salient excerpt detection
+        try:
+            if self.train:
+                # Random salient excerpt for training
+                state = util.random_state(index)
+                signal = AudioSignal.salient_excerpt(
+                    audio_path,
+                    duration=self.duration,
+                    state=state,
+                    loudness_cutoff=self.loudness_cutoff,
+                )
+            else:
+                # Deterministic first excerpt for validation
+                signal = AudioSignal(audio_path, duration=self.duration, offset=0)
+        except Exception as e:
+            # Fallback to zeros if file loading fails
+            signal = AudioSignal.zeros(self.duration, self.sample_rate, 1)
+        
+        # Ensure correct sample rate and duration
+        signal = signal.resample(self.sample_rate).to_mono()
+        if signal.duration < self.duration:
+            signal = signal.zero_pad_to(self.num_samples)
+        elif signal.audio_data.shape[-1] > self.num_samples:
+            signal.audio_data = signal.audio_data[..., :self.num_samples]
+        
+        # Store metadata
+        signal.metadata["path"] = audio_path
+        signal.metadata["index"] = file_idx
+        
+        # Build return dict matching AudioDataset API
+        item = {
+            "signal": signal,
+            "path": str(audio_path),
+            "index": file_idx,
+        }
+        
+        # Instantiate transform args if provided
+        if self.transform is not None:
+            state = util.random_state(index)
+            item["transform_args"] = self.transform.instantiate(state, signal=signal)
+        else:
+            item["transform_args"] = {}
+        
+        return item
+    
+    def collate(self, batch):
+        """Collate function compatible with audiotools.data.datasets.AudioDataset."""
+        return util.collate(batch)
+
+
 @argbind.bind("train", "val")
 def build_transform(
     augment_prob: float = 1.0,
@@ -108,19 +212,43 @@ def build_dataset(
     sample_rate: int,
     folders: dict = None,
     filelist: str = None,
+    use_simple_dataset: bool = True,
+    duration: float = 3.0,
+    n_examples: int = 1000,
 ):
     """Build an AudioDataset from either a CSV filelist (one path per line)
     or a dict of {name: [folder_paths]}.  filelist takes priority.
 
     The filelist format is identical to what Q2D2 uses
     (datasets/fsd50k_train.csv / datasets/fsd50k_val.csv).
+    
+    Parameters
+    ----------
+    use_simple_dataset : bool
+        If True and filelist is provided, use SimpleAudioDataset (fast, multiprocess-compatible).
+        If False, use AudioLoader (slow initialization, ~4s per worker).
+        Default True to enable num_workers > 0 on shared storage.
     """
     if filelist is not None:
-        with open(filelist) as f:
-            sources = [line.strip() for line in f if line.strip()]
-        loader = AudioLoader(sources=sources)
         transform = build_transform()
-        dataset = AudioDataset(loader, sample_rate, transform=transform)
+        
+        if use_simple_dataset:
+            # Fast CSV loading compatible with multiprocess DataLoader
+            dataset = SimpleAudioDataset(
+                filelist=filelist,
+                sample_rate=sample_rate,
+                duration=duration,
+                n_examples=n_examples,
+                transform=transform,
+                train=("train" in filelist.lower()),  # Heuristic: train vs val
+            )
+        else:
+            # Original AudioLoader path (slow with num_workers > 0)
+            with open(filelist) as f:
+                sources = [line.strip() for line in f if line.strip()]
+            loader = AudioLoader(sources=sources)
+            dataset = AudioDataset(loader, sample_rate, transform=transform)
+        
         return dataset
 
     # Fallback: original folders-based loading

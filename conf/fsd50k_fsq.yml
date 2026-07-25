@@ -41,7 +41,15 @@ lambdas:
 train/build_dataset.filelist: datasets/fsd50k_train.csv
 val/build_dataset.filelist: datasets/fsd50k_val.csv
 
-# ── AudioDataset ──────────────────────────────────────────────────────────────
+# ── SimpleAudioDataset (fast CSV loading compatible with num_workers > 0) ─────
+train/build_dataset.use_simple_dataset: true
+train/build_dataset.duration: 3.0
+train/build_dataset.n_examples: 8080
+val/build_dataset.use_simple_dataset: true
+val/build_dataset.duration: 5.0
+val/build_dataset.n_examples: 250
+
+# ── AudioDataset (legacy, slow with multiprocess - kept for folder-based loading) ──
 train/AudioDataset.duration: 3.0
 train/AudioDataset.n_examples: 8080
 val/AudioDataset.duration: 5.0
