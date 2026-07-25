@@ -125,8 +125,21 @@ class SimpleAudioDataset(torch.utils.data.Dataset):
         train: bool = True,
         loudness_cutoff: float = -40,
     ):
+        print(f"[SimpleAudioDataset] Initializing from: {filelist}")
+        print(f"[SimpleAudioDataset] Duration: {duration}s, Sample rate: {sample_rate} Hz, Examples: {n_examples}")
+        
         with open(filelist) as f:
             self.file_list = [line.strip() for line in f if line.strip()]
+        
+        print(f"[SimpleAudioDataset] Read {len(self.file_list)} audio paths from CSV")
+        print(f"[SimpleAudioDataset] First path: {self.file_list[0]}")
+        
+        # Check if first file exists
+        if Path(self.file_list[0]).exists():
+            print(f"[SimpleAudioDataset] \u2713 First file exists")
+        else:
+            print(f"[SimpleAudioDataset] \u2717 WARNING: First file NOT FOUND: {self.file_list[0]}")
+        
         self.sample_rate = sample_rate
         self.duration = duration
         self.n_examples = n_examples
@@ -134,15 +147,28 @@ class SimpleAudioDataset(torch.utils.data.Dataset):
         self.train = train
         self.loudness_cutoff = loudness_cutoff
         self.num_samples = int(duration * sample_rate)
+        self.load_count = 0  # Track how many samples loaded
+        
+        print(f"[SimpleAudioDataset] Initialization complete")
         
     def __len__(self) -> int:
         return self.n_examples
     
     def __getitem__(self, index: int):
-        # Debug: Log every 100th sample to confirm loading is working
-        if index % 100 == 0:
+        self.load_count += 1
+        
+        # Debug: Log only during first epoch (first n_examples calls)
+        # After that, logging is suppressed to avoid spam
+        if self.load_count <= self.n_examples:
+            # Log every 100th sample or first 5 samples during first epoch
+            if index < 5 or index % 100 == 0:
+                import sys
+                print(f"[DataLoader] Loading sample {index}/{self.n_examples} (total loads: {self.load_count})", file=sys.stderr, flush=True)
+                print(f"[DataLoader]   File index: {index % len(self.file_list)}/{len(self.file_list)}", file=sys.stderr, flush=True)
+        elif self.load_count == self.n_examples + 1:
+            # Log once when verbose logging is disabled
             import sys
-            print(f"[DataLoader] Loading sample {index}/{self.n_examples}", file=sys.stderr, flush=True)
+            print(f"[DataLoader] First epoch complete ({self.n_examples} samples loaded). Verbose logging disabled.", file=sys.stderr, flush=True)
         
         # Wrap around if n_examples > len(file_list)
         file_idx = index % len(self.file_list)
@@ -329,7 +355,9 @@ def load(
     tracker.print(discriminator)
     
     # Count parameters and calculate expected memory footprint
-    tracker.print("\n=== Model Parameter Analysis ===")
+    tracker.print("\n" + "="*70)
+    tracker.print("=== Model Parameter Analysis ===")
+    tracker.print("="*70)
     gen_params = sum(p.numel() for p in generator.parameters())
     disc_params = sum(p.numel() for p in discriminator.parameters())
     total_params = gen_params + disc_params
@@ -338,6 +366,7 @@ def load(
     tracker.print(f"Generator parameters: {gen_params:,} ({gen_params * 4 / 1024**2:.1f} MiB)")
     tracker.print(f"Discriminator parameters: {disc_params:,} ({disc_params * 4 / 1024**2:.1f} MiB)")
     tracker.print(f"Total parameters: {total_params:,} ({expected_mem_mib:.1f} MiB expected)")
+    tracker.print("="*70)
     
     # Check initial device placement
     gen_device_init = next(generator.parameters()).device
@@ -347,23 +376,28 @@ def load(
 
     # CRITICAL FIX: Move to GPU BEFORE prepare_model (prepare_model wrapping prevents .to() from working)
     if accel.device != 'cpu':
-        tracker.print(f"\n=== Moving Models to {accel.device} ===")
+        tracker.print("\n" + "="*70)
+        tracker.print(f"=== Moving Models to {accel.device} ===")
+        tracker.print("="*70)
         mem_before_move = torch.cuda.memory_allocated() / 1024**2
         tracker.print(f"GPU memory before .to(): {mem_before_move:.1f} MiB")
         
         # Try moving to GPU
+        tracker.print(f"Calling generator.to({accel.device})...")
         generator = generator.to(accel.device)
+        tracker.print(f"Calling discriminator.to({accel.device})...")
         discriminator = discriminator.to(accel.device)
         
         # Check memory IMMEDIATELY after .to() - this is the critical diagnostic
         mem_after_move = torch.cuda.memory_allocated() / 1024**2
         mem_delta = mem_after_move - mem_before_move
-        tracker.print(f"GPU memory after .to(): {mem_after_move:.1f} MiB (delta: +{mem_delta:.1f} MiB)")
+        tracker.print(f"\nGPU memory after .to(): {mem_after_move:.1f} MiB (delta: +{mem_delta:.1f} MiB)")
+        tracker.print(f"Expected delta: ~{expected_mem_mib:.1f} MiB")
         
         # Verify parameter devices
         gen_device_before = next(generator.parameters()).device
         disc_device_before = next(discriminator.parameters()).device
-        tracker.print(f"Generator parameter device: {gen_device_before}")
+        tracker.print(f"\nGenerator parameter device: {gen_device_before}")
         tracker.print(f"Discriminator parameter device: {disc_device_before}")
         
         # Check buffer devices (batch norm stats, etc.)
@@ -382,43 +416,53 @@ def load(
         
         # CRITICAL: Assert memory was actually allocated
         if mem_delta < expected_mem_mib * 0.5:  # Should allocate at least 50% of expected
-            tracker.print(f"\n✗ WARNING: .to() did not allocate expected memory!")
-            tracker.print(f"  Expected: ~{expected_mem_mib:.1f} MiB")
-            tracker.print(f"  Actual delta: {mem_delta:.1f} MiB")
-            tracker.print(f"\n  Attempting alternative: .cuda() method...")
+            tracker.print("\n" + "!"*70)
+            tracker.print("!!! WARNING: .to() did not allocate expected memory !!!")
+            tracker.print("!"*70)
+            tracker.print(f"Expected: ~{expected_mem_mib:.1f} MiB")
+            tracker.print(f"Actual delta: {mem_delta:.1f} MiB")
+            tracker.print(f"Ratio: {mem_delta / expected_mem_mib * 100:.1f}%")
+            tracker.print("\nAttempting alternative: .cuda() method...")
             
             # Try .cuda() as alternative
             generator = generator.cuda()
             discriminator = discriminator.cuda()
             mem_after_cuda = torch.cuda.memory_allocated() / 1024**2
             mem_delta_cuda = mem_after_cuda - mem_before_move
-            tracker.print(f"  GPU memory after .cuda(): {mem_after_cuda:.1f} MiB (delta: +{mem_delta_cuda:.1f} MiB)")
+            tracker.print(f"GPU memory after .cuda(): {mem_after_cuda:.1f} MiB (delta: +{mem_delta_cuda:.1f} MiB)")
             
             if mem_delta_cuda < expected_mem_mib * 0.5:
+                tracker.print("\n" + "X"*70)
+                tracker.print("XXX CRITICAL ERROR: Cannot move models to GPU! XXX")
+                tracker.print("X"*70)
                 raise RuntimeError(
                     f"Cannot move models to GPU! Tried .to() and .cuda(), neither allocated memory.\n"
                     f"Expected: {expected_mem_mib:.1f} MiB, Got: {mem_delta_cuda:.1f} MiB\n"
                     f"Models may be empty or initialized with meta device."
                 )
             else:
-                tracker.print(f"  ✓ .cuda() worked! Using .cuda() instead of .to()")
+                tracker.print(f"✓ .cuda() worked! Using .cuda() instead of .to()")
         else:
-            tracker.print(f"✓ Memory allocation successful ({mem_delta:.1f} MiB allocated)")
+            tracker.print(f"\n✓ Memory allocation successful ({mem_delta:.1f} MiB allocated)")
+            tracker.print("="*70)
 
     # Now wrap with prepare_model (should preserve GPU placement)
-    tracker.print(f"\n=== Wrapping with prepare_model ===")
+    tracker.print("\n" + "="*70)
+    tracker.print("=== Wrapping with prepare_model ===")
+    tracker.print("="*70)
     mem_before_prepare = torch.cuda.memory_allocated() / 1024**2 if torch.cuda.is_available() else 0
+    tracker.print(f"GPU memory before wrapping: {mem_before_prepare:.1f} MiB")
     
     generator = accel.prepare_model(generator)
     discriminator = accel.prepare_model(discriminator)
     
     mem_after_prepare = torch.cuda.memory_allocated() / 1024**2 if torch.cuda.is_available() else 0
-    tracker.print(f"GPU memory after prepare_model: {mem_after_prepare:.1f} MiB (delta: {mem_after_prepare - mem_before_prepare:+.1f} MiB)")
+    tracker.print(f"GPU memory after wrapping: {mem_after_prepare:.1f} MiB (delta: {mem_after_prepare - mem_before_prepare:+.1f} MiB)")
 
     # Verify models are still on the correct device after prepare_model
     gen_device_final = next(generator.parameters()).device
     disc_device_final = next(discriminator.parameters()).device
-    tracker.print(f"Generator device after prepare_model: {gen_device_final}")
+    tracker.print(f"\nGenerator device after prepare_model: {gen_device_final}")
     tracker.print(f"Discriminator device after prepare_model: {disc_device_final}")
     
     # Assert GPU placement if CUDA is requested
@@ -428,12 +472,16 @@ def load(
         
         # Verify memory didn't drop (prepare_model shouldn't move back to CPU)
         if mem_after_prepare < mem_before_prepare * 0.9:
+            tracker.print("\n" + "X"*70)
+            tracker.print("XXX CRITICAL ERROR: prepare_model moved models back to CPU! XXX")
+            tracker.print("X"*70)
             raise RuntimeError(
                 f"prepare_model moved models back to CPU!\n"
                 f"Before: {mem_before_prepare:.1f} MiB, After: {mem_after_prepare:.1f} MiB"
             )
         
-        tracker.print("✓ GPU placement verified after prepare_model")
+        tracker.print("\n✓ GPU placement verified after prepare_model")
+        tracker.print("="*70)
 
     with argbind.scope(args, "generator"):
         optimizer_g = AdamW(generator.parameters(), use_zero=accel.use_ddp)
@@ -455,12 +503,29 @@ def load(
         scheduler_d.load_state_dict(d_extra["scheduler.pth"])
 
     sample_rate = accel.unwrap(generator).sample_rate
+    
+    tracker.print("\n" + "="*70)
+    tracker.print("=== Building Datasets ===")
+    tracker.print("="*70)
+    tracker.print(f"Sample rate: {sample_rate} Hz\n")
+    
     with argbind.scope(args, "train"):
+        tracker.print("Loading training dataset...")
         train_data = build_dataset(sample_rate)
-        tracker.print(f"Train dataset: {type(train_data).__name__}, length={len(train_data)}")
+        tracker.print(f"✓ Train dataset: {type(train_data).__name__}, length={len(train_data)}")
+        if hasattr(train_data, 'file_list'):
+            tracker.print(f"  Audio files: {len(train_data.file_list)}")
+            tracker.print(f"  Duration: {train_data.duration}s ({train_data.num_samples} samples)")
+    
     with argbind.scope(args, "val"):
+        tracker.print("\nLoading validation dataset...")
         val_data = build_dataset(sample_rate)
-        tracker.print(f"Val dataset: {type(val_data).__name__}, length={len(val_data)}")
+        tracker.print(f"✓ Val dataset: {type(val_data).__name__}, length={len(val_data)}")
+        if hasattr(val_data, 'file_list'):
+            tracker.print(f"  Audio files: {len(val_data.file_list)}")
+            tracker.print(f"  Duration: {val_data.duration}s ({val_data.num_samples} samples)")
+    
+    tracker.print("="*70)
 
     waveform_loss = losses.L1Loss()
     stft_loss = losses.MultiScaleSTFTLoss()
@@ -714,17 +779,40 @@ def train(
     final_mem = 0.0  # Initialize for later reference
     if torch.cuda.is_available():
         final_mem = torch.cuda.memory_allocated() / 1024**2
-        tracker.print(f"\n=== Final Memory Check ===")
+        tracker.print("\n" + "="*70)
+        tracker.print("=== Final Memory Check ===")
+        tracker.print("="*70)
         tracker.print(f"GPU memory after all models loaded: {final_mem:.1f} MiB")
         
         # This should pass if load() succeeded
         if final_mem < 1000:
+            tracker.print("\n" + "X"*70)
+            tracker.print("XXX CRITICAL ERROR: Models not properly loaded to GPU! XXX")
+            tracker.print("X"*70)
+            tracker.print(f"Expected: >1000 MiB")
+            tracker.print(f"Actual: {final_mem:.1f} MiB")
+            tracker.print(f"\nThis means the GPU placement in load() function failed.")
+            tracker.print(f"Check the diagnostic output above for the root cause.")
+            tracker.print("X"*70)
             raise RuntimeError(
                 f"Models not properly loaded to GPU!\n"
                 f"Expected: >1000 MiB, Got: {final_mem:.1f} MiB\n"
                 f"Check diagnostics above for root cause."
             )
         tracker.print(f"✓ Final GPU memory check passed ({final_mem:.1f} MiB allocated)")
+        tracker.print("="*70)
+    
+    # DataLoader creation with diagnostics
+    tracker.print("\n" + "="*70)
+    tracker.print("=== Creating DataLoaders ===")
+    tracker.print("="*70)
+    tracker.print(f"Training DataLoader config:")
+    tracker.print(f"  Batch size: {batch_size}")
+    tracker.print(f"  Num workers: {num_workers}")
+    tracker.print(f"  Start index: {state.tracker.step * batch_size}")
+    tracker.print(f"  Persistent workers: {True if num_workers > 0 else False}")
+    tracker.print(f"  Pin memory: True")
+    
     train_dataloader = accel.prepare_dataloader(
         state.train_data,
         start_idx=state.tracker.step * batch_size,
@@ -737,13 +825,19 @@ def train(
     steps_per_epoch = len(train_dataloader)
     if num_iters is None:
         num_iters = training_epochs * steps_per_epoch
-    tracker.print(
-        f"Training DAC-FSQ for {training_epochs} epochs "
-        f"({num_iters} iterations, {steps_per_epoch} steps/epoch)"
-    )
+    
+    tracker.print(f"\n✓ Training DataLoader created")
+    tracker.print(f"  Steps per epoch: {steps_per_epoch}")
+    tracker.print(f"  Total iterations: {num_iters} ({training_epochs} epochs)")
+    tracker.print("="*70)
     
     # ── Test first batch load (fail fast if DataLoader hangs) ──────────────────
-    tracker.print("Testing first batch load (timeout: 60s)...")
+    tracker.print("\n" + "="*70)
+    tracker.print("=== Testing First Batch Load ===")
+    tracker.print("="*70)
+    tracker.print("Timeout: 60 seconds")
+    tracker.print("This will verify DataLoader can load data successfully...\n")
+    
     import time
     import signal
     
@@ -756,24 +850,51 @@ def train(
     try:
         train_dataloader_test = get_infinite_loader(train_dataloader)
         start_time = time.time()
+        tracker.print("Calling next(dataloader)...")
         test_batch = next(train_dataloader_test)
         signal.alarm(0)  # Cancel alarm
         elapsed = time.time() - start_time
-        tracker.print(f"✓ First batch loaded successfully in {elapsed:.1f}s")
+        
+        tracker.print(f"\n✓ First batch loaded successfully in {elapsed:.1f}s")
+        
+        # Show batch details
+        tracker.print(f"\nBatch details:")
+        if isinstance(test_batch, dict):
+            tracker.print(f"  Batch type: dict with keys: {list(test_batch.keys())}")
+            if 'signal' in test_batch:
+                signal_obj = test_batch['signal']
+                if hasattr(signal_obj, 'audio_data'):
+                    audio_data = signal_obj.audio_data
+                    tracker.print(f"  Signal.audio_data shape: {audio_data.shape}")
+                    tracker.print(f"  Signal.audio_data dtype: {audio_data.dtype}")
+                    tracker.print(f"  Signal.audio_data device: {audio_data.device}")
+                    tracker.print(f"  Signal.audio_data range: [{audio_data.min():.4f}, {audio_data.max():.4f}]")
+        else:
+            tracker.print(f"  Batch type: {type(test_batch)}")
+            if hasattr(test_batch, 'shape'):
+                tracker.print(f"  Batch shape: {test_batch.shape}")
         
         if torch.cuda.is_available():
             batch_mem = torch.cuda.memory_allocated() / 1024**2
-            tracker.print(f"GPU memory after first batch: {batch_mem:.1f} MiB")
+            tracker.print(f"\nGPU memory after first batch: {batch_mem:.1f} MiB")
             if batch_mem <= final_mem:
                 tracker.print(f"⚠ WARNING: GPU memory unchanged ({batch_mem:.1f} MiB), batch may not be on GPU")
             else:
                 tracker.print(f"✓ Batch loaded to GPU successfully (delta: +{batch_mem-final_mem:.1f} MiB)")
+        
+        tracker.print("\nNote: Detailed dataset logging will only appear in first epoch")
+        tracker.print("="*70)
     except TimeoutError as e:
-        tracker.print(f"❌ FAILED: {e}")
+        tracker.print(f"\n❌ FAILED: {e}")
         tracker.print("Possible causes: num_workers too high, slow file I/O, or dataset __getitem__ hang")
+        tracker.print("="*70)
         raise
     except Exception as e:
-        tracker.print(f"❌ FAILED to load first batch: {e}")
+        tracker.print(f"\n❌ FAILED to load first batch: {e}")
+        tracker.print(f"Exception type: {type(e).__name__}")
+        import traceback
+        tracker.print(f"Traceback:\n{traceback.format_exc()}")
+        tracker.print("="*70)
         raise
 
     # ── W&B init (rank-0 only) ────────────────────────────────────────────────
