@@ -445,6 +445,8 @@ def train(
         num_workers=num_workers,
         batch_size=batch_size,
         collate_fn=state.train_data.collate,
+        persistent_workers=True if num_workers > 0 else False,
+        pin_memory=True,
     )
     steps_per_epoch = len(train_dataloader)
     if num_iters is None:
