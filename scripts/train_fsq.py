@@ -713,10 +713,17 @@ def train(
     # Final GPU memory check after all models loaded
     if torch.cuda.is_available():
         final_mem = torch.cuda.memory_allocated() / 1024**2
-        tracker.print(f\"\\n=== Final Memory Check ===\")
-        tracker.print(f\"GPU memory after all models loaded: {final_mem:.1f} MiB\")\n        
+        tracker.print(f"\n=== Final Memory Check ===")
+        tracker.print(f"GPU memory after all models loaded: {final_mem:.1f} MiB")
+        
         # This should pass if load() succeeded
-        if final_mem < 1000:\n            raise RuntimeError(\n                f\"Models not properly loaded to GPU!\\n\"\n                f\"Expected: >1000 MiB, Got: {final_mem:.1f} MiB\\n\"\n                f\"Check diagnostics above for root cause.\"\n            )\n        tracker.print(f\"\u2713 Final GPU memory check passed ({final_mem:.1f} MiB allocated)\")
+        if final_mem < 1000:
+            raise RuntimeError(
+                f"Models not properly loaded to GPU!\n"
+                f"Expected: >1000 MiB, Got: {final_mem:.1f} MiB\n"
+                f"Check diagnostics above for root cause."
+            )
+        tracker.print(f"✓ Final GPU memory check passed ({final_mem:.1f} MiB allocated)")
     train_dataloader = accel.prepare_dataloader(
         state.train_data,
         start_idx=state.tracker.step * batch_size,
