@@ -39,6 +39,13 @@ from torch.utils.tensorboard import SummaryWriter
 
 import dac
 
+# Add project root to path for shared utilities
+_PROJ_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_PROJ_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJ_ROOT))
+
+from datasets.audio_preprocessing import normalize_rms_snr
+
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # W&B (optional)
@@ -190,10 +197,12 @@ class SimpleAudioDataset(torch.utils.data.Dataset):
             elif y.ndim == 2:
                 y = y.mean(dim=-1, keepdim=True).T  # [samples, channels] -> [1, samples]
             
-            # Apply VolumeNorm-style gain
-            gain = np.random.uniform(-1, -6) if self.train else -3
-            y, sr = torchaudio.sox_effects.apply_effects_tensor(
-                y, sr, [["norm", f"{gain:.2f}"]]
+            # Apply RMS/SNR normalization (preserves amplitude relationships)
+            y = normalize_rms_snr(
+                y,
+                target_snr_db=40.0,
+                train_mode=self.train,
+                snr_variation_db=5.0
             )
             
             # Resample if needed
