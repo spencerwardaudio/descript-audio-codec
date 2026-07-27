@@ -44,7 +44,7 @@ _PROJ_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJ_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJ_ROOT))
 
-from datasets.audio_preprocessing import normalize_rms_snr
+from dataloader_aug.audio_preprocessing import normalize_rms_snr
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
