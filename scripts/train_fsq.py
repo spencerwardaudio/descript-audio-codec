@@ -51,6 +51,8 @@ except ImportError:
 
 # Module-level run handle; set by train(), read by train_loop / val_loop.
 _wandb_run = None
+# Steps per epoch — set by train() so train_loop/val_loop can compute epoch number.
+_steps_per_epoch: int = 1
 
 # Enable cudnn autotuner to speed up training.
 torch.backends.cudnn.benchmark = bool(int(os.getenv("CUDNN_BENCHMARK", 1)))
@@ -588,14 +590,15 @@ def val_loop(batch, state, accel):
     }
 
     # W&B val logging
-    global _wandb_run
+    global _wandb_run, _steps_per_epoch
     if _wandb_run is not None:
-        wandb.log(
-            {
-                "val/" + k: v.item() if hasattr(v, "item") else v
-                for k, v in out_dict.items()
-            }
-        )
+        current_epoch = state.tracker.step // _steps_per_epoch
+        log_dict = {
+            "val/" + k: v.item() if hasattr(v, "item") else v
+            for k, v in out_dict.items()
+        }
+        log_dict["epoch"] = current_epoch
+        wandb.log(log_dict)
 
     return out_dict
 
@@ -668,11 +671,12 @@ def train_loop(state, batch, accel, lambdas):
     result = {k: v for k, v in sorted(output.items())}
 
     # W&B train logging (rank-0 only)
-    global _wandb_run
+    global _wandb_run, _steps_per_epoch
     if _wandb_run is not None:
-        wandb.log(
-            {k: v.item() if hasattr(v, "item") else v for k, v in result.items()}
-        )
+        current_epoch = state.tracker.step // _steps_per_epoch
+        log_dict = {k: v.item() if hasattr(v, "item") else v for k, v in result.items()}
+        log_dict["epoch"] = current_epoch
+        wandb.log(log_dict)
 
     return result
 
@@ -947,6 +951,14 @@ def train(
         tracker.print(
             f"W&B run: {_wandb_run.url if hasattr(_wandb_run, 'url') else 'initialized'}"
         )
+        # Define epoch as a custom x-axis so charts can be viewed per-epoch in W&B
+        wandb.define_metric("epoch")
+        wandb.define_metric("train/*", step_metric="epoch")
+        wandb.define_metric("val/*", step_metric="epoch")
+        wandb.define_metric("epoch_summary/*", step_metric="epoch")
+
+    global _steps_per_epoch
+    _steps_per_epoch = steps_per_epoch
 
     train_dataloader = get_infinite_loader(train_dataloader)
     val_dataloader = accel.prepare_dataloader(
@@ -983,6 +995,19 @@ def train(
                 validate(state, val_dataloader, accel)
                 checkpoint(state, save_iters, save_path)
                 tracker.done("val", f"Iteration {tracker.step}")
+
+            # ── Epoch-boundary summary log ─────────────────────────────────
+            if _wandb_run is not None and steps_per_epoch > 0:
+                if (tracker.step + 1) % steps_per_epoch == 0 or last_iter:
+                    completed_epoch = (tracker.step + 1) // steps_per_epoch
+                    train_hist = state.tracker.history.get("train", {})
+                    summary: dict = {"epoch": completed_epoch}
+                    for metric in ("loss", "mel/loss", "stft/loss", "adv/gen_loss",
+                                   "adv/disc_loss", "other/grad_norm", "other/grad_norm_d"):
+                        vals = train_hist.get(metric, [])
+                        if vals:
+                            summary[f"epoch_summary/{metric}"] = sum(vals) / len(vals)
+                    wandb.log(summary)
 
             if last_iter:
                 break
