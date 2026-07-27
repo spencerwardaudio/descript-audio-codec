@@ -22,6 +22,9 @@ from typing import Callable
 
 import argbind
 import torch
+import soundfile
+import torchaudio
+import numpy as np
 from audiotools import AudioSignal
 from audiotools import ml
 from audiotools.core import util
@@ -36,6 +39,13 @@ from torch.utils.tensorboard import SummaryWriter
 
 import dac
 
+# Add project root to path for shared utilities
+_PROJ_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_PROJ_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJ_ROOT))
+
+from datasets.audio_preprocessing import normalize_rms_snr
+
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # W&B (optional)
@@ -48,6 +58,8 @@ except ImportError:
 
 # Module-level run handle; set by train(), read by train_loop / val_loop.
 _wandb_run = None
+# Steps per epoch — set by train() so train_loop/val_loop can compute epoch number.
+_steps_per_epoch: int = 1
 
 # Enable cudnn autotuner to speed up training.
 torch.backends.cudnn.benchmark = bool(int(os.getenv("CUDNN_BENCHMARK", 1)))
@@ -90,12 +102,11 @@ def get_infinite_loader(dataloader):
 
 
 class SimpleAudioDataset(torch.utils.data.Dataset):
-    """Lightweight CSV-based audio dataset compatible with multiprocess DataLoader.
+    """Fast tensor-based CSV audio dataset compatible with multiprocess DataLoader.
     
-    Unlike AudioLoader (which takes ~4s to initialize and repeats per worker),
-    this reads the CSV once and loads audio on-demand in __getitem__.
-    Uses simple random cropping instead of expensive salient_excerpt() for speed.
-    Modeled on Q2D2's VocosDataset but adapted for DAC-FSQ's AudioSignal interface.
+    Uses soundfile.read() for fast loading (10-15x faster than AudioSignal),
+    returns raw tensors with metadata, converted to AudioSignal in training loop only when needed.
+    Modeled on Q2D2's VocosDataset for optimal GPU performance.
     
     Parameters
     ----------
@@ -112,7 +123,7 @@ class SimpleAudioDataset(torch.utils.data.Dataset):
     train : bool, optional
         Whether this is a training dataset (random crops) or validation (deterministic), by default True
     loudness_cutoff : float, optional
-        UNUSED - kept for API compatibility (salient_excerpt removed for speed)
+        UNUSED - kept for API compatibility
     """
     
     def __init__(
@@ -176,59 +187,72 @@ class SimpleAudioDataset(torch.utils.data.Dataset):
         
         # Load audio - use simple random crop instead of expensive salient_excerpt
         try:
-            # Load full audio file
-            signal = AudioSignal(audio_path)
-            signal = signal.resample(self.sample_rate).to_mono()
+            # soundfile.read is ~10x faster than AudioSignal for full files
+            y, sr = soundfile.read(audio_path)
+            y = torch.tensor(y).float()
             
-            # Random crop for training, deterministic for validation
-            if signal.audio_data.shape[-1] > self.num_samples:
-                if self.train:
-                    # Random crop
-                    state = util.random_state(index)
-                    max_start = signal.audio_data.shape[-1] - self.num_samples
-                    start = int(state.random() * max_start)
-                    signal.audio_data = signal.audio_data[..., start:start + self.num_samples]
-                else:
-                    # Deterministic first crop
-                    signal.audio_data = signal.audio_data[..., :self.num_samples]
-            elif signal.audio_data.shape[-1] < self.num_samples:
-                # Pad if too short
-                signal = signal.zero_pad_to(self.num_samples)
+            # Handle mono/stereo
+            if y.ndim == 1:
+                y = y.unsqueeze(0)  # [samples] -> [1, samples]
+            elif y.ndim == 2:
+                y = y.mean(dim=-1, keepdim=True).T  # [samples, channels] -> [1, samples]
+            
+            # Apply RMS/SNR normalization (preserves amplitude relationships)
+            y = normalize_rms_snr(
+                y,
+                target_snr_db=40.0,
+                train_mode=self.train,
+                snr_variation_db=5.0
+            )
+            
+            # Resample if needed
+            if sr != self.sample_rate:
+                y = torchaudio.functional.resample(y, orig_freq=sr, new_freq=self.sample_rate)
+            
+            # Crop or pad to exact duration
+            if y.size(-1) < self.num_samples:
+                # Pad by repeating
+                pad_length = self.num_samples - y.size(-1)
+                padding_tensor = y.repeat(1, 1 + pad_length // y.size(-1))
+                y = torch.cat((y, padding_tensor[:, :pad_length]), dim=1)
+            elif self.train:
+                # Random crop
+                start = np.random.randint(low=0, high=y.size(-1) - self.num_samples + 1)
+                y = y[:, start : start + self.num_samples]
+            else:
+                # Deterministic first crop for validation
+                y = y[:, :self.num_samples]
                 
         except Exception as e:
             # Fallback to zeros if file loading fails
-            signal = AudioSignal.zeros(self.duration, self.sample_rate, 1)
+            import sys
+            print(f"[DataLoader] ERROR loading {audio_path}: {e}", file=sys.stderr, flush=True)
+            y = torch.zeros(1, self.num_samples)
         
-        # Ensure exact duration
-        if signal.audio_data.shape[-1] != self.num_samples:
-            if signal.audio_data.shape[-1] > self.num_samples:
-                signal.audio_data = signal.audio_data[..., :self.num_samples]
-            else:
-                signal = signal.zero_pad_to(self.num_samples)
-        
-        # Store metadata
-        signal.metadata["path"] = audio_path
-        signal.metadata["index"] = file_idx
-        
-        # Build return dict matching AudioDataset API
+        # Build return dict with raw tensor
         item = {
-            "signal": signal,
+            "audio": y,
+            "sample_rate": self.sample_rate,
             "path": str(audio_path),
             "index": file_idx,
         }
         
-        # Instantiate transform args if provided
-        if self.transform is not None:
-            state = util.random_state(index)
-            item["transform_args"] = self.transform.instantiate(state, signal=signal)
-        else:
-            item["transform_args"] = {}
+        # Transform args (no transform applied yet - done in training loop)
+        item["transform_args"] = {}
         
         return item
     
     def collate(self, batch):
-        """Collate function compatible with audiotools.data.datasets.AudioDataset."""
-        return util.collate(batch)
+        """Collate function for DataLoader - stacks tensors instead of AudioSignals."""
+        # Stack tensors into batch
+        audio_batch = torch.stack([item["audio"] for item in batch], dim=0)  # [B, 1, T]
+        return {
+            "audio": audio_batch,
+            "sample_rate": batch[0]["sample_rate"],
+            "paths": [item["path"] for item in batch],
+            "indices": [item["index"] for item in batch],
+            "transform_args": batch[0]["transform_args"],
+        }
 
 
 @argbind.bind("train", "val")
@@ -558,8 +582,14 @@ def load(
 def val_loop(batch, state, accel):
     state.generator.eval()
     batch = util.prepare_batch(batch, accel.device)
+    
+    # Convert raw tensor batch to AudioSignal for transforms and losses
+    audio_tensor = batch["audio"].squeeze(1)  # [B, 1, T] -> [B, T]
+    sample_rate = batch["sample_rate"]
+    signal = AudioSignal(audio_tensor, sample_rate)
+    
     signal = state.val_data.transform(
-        batch["signal"].clone(), **batch["transform_args"]
+        signal.clone(), **batch["transform_args"]
     )
 
     out = state.generator(signal.audio_data, signal.sample_rate)
@@ -573,14 +603,15 @@ def val_loop(batch, state, accel):
     }
 
     # W&B val logging
-    global _wandb_run
+    global _wandb_run, _steps_per_epoch
     if _wandb_run is not None:
-        wandb.log(
-            {
-                "val/" + k: v.item() if hasattr(v, "item") else v
-                for k, v in out_dict.items()
-            }
-        )
+        current_epoch = state.tracker.step // _steps_per_epoch
+        log_dict = {
+            "val/" + k: v.item() if hasattr(v, "item") else v
+            for k, v in out_dict.items()
+        }
+        log_dict["epoch"] = current_epoch
+        wandb.log(log_dict)
 
     return out_dict
 
@@ -592,9 +623,15 @@ def train_loop(state, batch, accel, lambdas):
     output = {}
 
     batch = util.prepare_batch(batch, accel.device)
+    
+    # Convert raw tensor batch to AudioSignal for transforms and losses
+    audio_tensor = batch["audio"].squeeze(1)  # [B, 1, T] -> [B, T]
+    sample_rate = batch["sample_rate"]
+    signal = AudioSignal(audio_tensor, sample_rate)
+    
     with torch.no_grad():
         signal = state.train_data.transform(
-            batch["signal"].clone(), **batch["transform_args"]
+            signal.clone(), **batch["transform_args"]
         )
 
     with accel.autocast():
@@ -647,11 +684,12 @@ def train_loop(state, batch, accel, lambdas):
     result = {k: v for k, v in sorted(output.items())}
 
     # W&B train logging (rank-0 only)
-    global _wandb_run
+    global _wandb_run, _steps_per_epoch
     if _wandb_run is not None:
-        wandb.log(
-            {k: v.item() if hasattr(v, "item") else v for k, v in result.items()}
-        )
+        current_epoch = state.tracker.step // _steps_per_epoch
+        log_dict = {k: v.item() if hasattr(v, "item") else v for k, v in result.items()}
+        log_dict["epoch"] = current_epoch
+        wandb.log(log_dict)
 
     return result
 
@@ -695,8 +733,14 @@ def save_samples(state, val_idx, writer):
     samples = [state.val_data[idx] for idx in val_idx]
     batch = state.val_data.collate(samples)
     batch = util.prepare_batch(batch, accel.device)
+    
+    # Convert raw tensor batch to AudioSignal for transforms and generation
+    audio_tensor = batch["audio"].squeeze(1)  # [B, 1, T] -> [B, T]
+    sample_rate = batch["sample_rate"]
+    signal = AudioSignal(audio_tensor, sample_rate)
+    
     signal = state.train_data.transform(
-        batch["signal"].clone(), **batch["transform_args"]
+        signal.clone(), **batch["transform_args"]
     )
 
     out = state.generator(signal.audio_data, signal.sample_rate)
@@ -928,6 +972,14 @@ def train(
         tracker.print(
             f"W&B run: {_wandb_run.url if hasattr(_wandb_run, 'url') else 'initialized'}"
         )
+        # Define epoch as a custom x-axis so charts can be viewed per-epoch in W&B
+        wandb.define_metric("epoch")
+        wandb.define_metric("train/*", step_metric="epoch")
+        wandb.define_metric("val/*", step_metric="epoch")
+        wandb.define_metric("epoch_summary/*", step_metric="epoch")
+
+    global _steps_per_epoch
+    _steps_per_epoch = steps_per_epoch
 
     train_dataloader = get_infinite_loader(train_dataloader)
     val_dataloader = accel.prepare_dataloader(
@@ -964,6 +1016,19 @@ def train(
                 validate(state, val_dataloader, accel)
                 checkpoint(state, save_iters, save_path)
                 tracker.done("val", f"Iteration {tracker.step}")
+
+            # ── Epoch-boundary summary log ─────────────────────────────────
+            if _wandb_run is not None and steps_per_epoch > 0:
+                if (tracker.step + 1) % steps_per_epoch == 0 or last_iter:
+                    completed_epoch = (tracker.step + 1) // steps_per_epoch
+                    train_hist = state.tracker.history.get("train", {})
+                    summary: dict = {"epoch": completed_epoch}
+                    for metric in ("loss", "mel/loss", "stft/loss", "adv/gen_loss",
+                                   "adv/disc_loss", "other/grad_norm", "other/grad_norm_d"):
+                        vals = train_hist.get(metric, [])
+                        if vals:
+                            summary[f"epoch_summary/{metric}"] = sum(vals) / len(vals)
+                    wandb.log(summary)
 
             if last_iter:
                 break
