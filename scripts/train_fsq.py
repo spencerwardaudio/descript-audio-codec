@@ -600,9 +600,11 @@ def val_loop(batch, state, accel):
     sample_rate = batch["sample_rate"]
     signal = AudioSignal(audio_tensor, sample_rate)
     
-    signal = state.val_data.transform(
-        signal.clone(), **transform_args
-    )
+    # Only pass kwargs if non-empty to avoid KeyError in transform system
+    if transform_args:
+        signal = state.val_data.transform(signal.clone(), **transform_args)
+    else:
+        signal = state.val_data.transform(signal.clone())
 
     out = state.generator(signal.audio_data, signal.sample_rate)
     recons = AudioSignal(out["audio"], signal.sample_rate)
@@ -644,9 +646,11 @@ def train_loop(state, batch, accel, lambdas):
     signal = AudioSignal(audio_tensor, sample_rate)
     
     with torch.no_grad():
-        signal = state.train_data.transform(
-            signal.clone(), **transform_args
-        )
+        # Only pass kwargs if non-empty to avoid KeyError in transform system
+        if transform_args:
+            signal = state.train_data.transform(signal.clone(), **transform_args)
+        else:
+            signal = state.train_data.transform(signal.clone())
 
     with accel.autocast():
         out = state.generator(signal.audio_data, signal.sample_rate)
@@ -755,9 +759,11 @@ def save_samples(state, val_idx, writer):
     sample_rate = batch["sample_rate"]
     signal = AudioSignal(audio_tensor, sample_rate)
     
-    signal = state.train_data.transform(
-        signal.clone(), **transform_args
-    )
+    # Only pass kwargs if non-empty to avoid KeyError in transform system
+    if transform_args:
+        signal = state.train_data.transform(signal.clone(), **transform_args)
+    else:
+        signal = state.train_data.transform(signal.clone())
 
     out = state.generator(signal.audio_data, signal.sample_rate)
     recons = AudioSignal(out["audio"], signal.sample_rate)
