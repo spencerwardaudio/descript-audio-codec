@@ -45,8 +45,6 @@ lambdas:
   vq/commitment_loss: 0.25
   vq/codebook_loss: 1.0
 
-VolumeNorm.db: [const, -16]
-
 # Transforms
 build_transform.preprocess:
   - Identity
@@ -54,7 +52,6 @@ build_transform.augment_prob: 0.0
 build_transform.augment:
   - Identity
 build_transform.postprocess:
-  - VolumeNorm
   - RescaleAudio
   - ShiftPhase
 

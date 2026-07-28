@@ -67,7 +67,6 @@ build_transform.augment_prob: 0.0
 build_transform.augment:
   - Identity
 build_transform.postprocess:
-  - VolumeNorm
   - RescaleAudio
   - ShiftPhase
 
@@ -86,4 +85,3 @@ amp: true
 device: cuda
 seed: 0
 val_idx: [0, 1, 2, 3, 4, 5, 6, 7]
-VolumeNorm.db: [const, -16]
