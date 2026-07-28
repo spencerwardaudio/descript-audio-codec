@@ -591,6 +591,8 @@ def load(
 @torch.no_grad()
 def val_loop(batch, state, accel):
     state.generator.eval()
+    # Extract transform_args before prepare_batch (which filters custom keys)
+    transform_args = batch.pop("transform_args", {})
     batch = util.prepare_batch(batch, accel.device)
     
     # Convert raw tensor batch to AudioSignal for transforms and losses
@@ -599,7 +601,7 @@ def val_loop(batch, state, accel):
     signal = AudioSignal(audio_tensor, sample_rate)
     
     signal = state.val_data.transform(
-        signal.clone(), **batch["transform_args"]
+        signal.clone(), **transform_args
     )
 
     out = state.generator(signal.audio_data, signal.sample_rate)
@@ -632,6 +634,8 @@ def train_loop(state, batch, accel, lambdas):
     state.discriminator.train()
     output = {}
 
+    # Extract transform_args before prepare_batch (which filters custom keys)
+    transform_args = batch.pop("transform_args", {})
     batch = util.prepare_batch(batch, accel.device)
     
     # Convert raw tensor batch to AudioSignal for transforms and losses
@@ -641,7 +645,7 @@ def train_loop(state, batch, accel, lambdas):
     
     with torch.no_grad():
         signal = state.train_data.transform(
-            signal.clone(), **batch["transform_args"]
+            signal.clone(), **transform_args
         )
 
     with accel.autocast():
@@ -742,6 +746,8 @@ def save_samples(state, val_idx, writer):
 
     samples = [state.val_data[idx] for idx in val_idx]
     batch = state.val_data.collate(samples)
+    # Extract transform_args before prepare_batch (which filters custom keys)
+    transform_args = batch.pop("transform_args", {})
     batch = util.prepare_batch(batch, accel.device)
     
     # Convert raw tensor batch to AudioSignal for transforms and generation
@@ -750,7 +756,7 @@ def save_samples(state, val_idx, writer):
     signal = AudioSignal(audio_tensor, sample_rate)
     
     signal = state.train_data.transform(
-        signal.clone(), **batch["transform_args"]
+        signal.clone(), **transform_args
     )
 
     out = state.generator(signal.audio_data, signal.sample_rate)
