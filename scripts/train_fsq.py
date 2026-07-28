@@ -247,8 +247,12 @@ class SimpleAudioDataset(torch.utils.data.Dataset):
             "index": file_idx,
         }
         
-        # Transform args (no transform applied yet - done in training loop)
-        item["transform_args"] = {}
+        # Generate proper transform args structure (needed for audiotools Compose)
+        # Transform is applied later in training loop, but kwargs structure is needed
+        if self.transform is not None:
+            item["transform_args"] = self.transform.instantiate()
+        else:
+            item["transform_args"] = {}
         
         return item
     
