@@ -22,7 +22,7 @@ Discriminator.periods: [2, 3, 5, 7, 11]
 Discriminator.fft_sizes: [2048, 1024, 512]
 
 # ── Training schedule (explicit 50 epochs on FSD50K, limited samples) ────────
-batch_size: 12
+batch_size: 8
 val_batch_size: 5
 num_workers: 12
 training_epochs: 50
