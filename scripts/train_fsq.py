@@ -599,17 +599,14 @@ def val_loop(batch, state, accel):
     transform_args = batch.pop("transform_args", {})
     batch = util.prepare_batch(batch, accel.device)
     
-    # Convert raw tensor batch to AudioSignal for transforms and losses
+    # Convert raw tensor batch to AudioSignal for losses
     # Keep channel dimension: AudioSignal expects [B, C, T] not [B, T]
     audio_tensor = batch["audio"]  # [B, 1, T]
     sample_rate = batch["sample_rate"]
     signal = AudioSignal(audio_tensor, sample_rate)
     
-    # Only pass kwargs if non-empty to avoid KeyError in transform system
-    if transform_args:
-        signal = state.val_data.transform(signal.clone(), **transform_args)
-    else:
-        signal = state.val_data.transform(signal.clone())
+    # No transforms - removed for fair codec comparison (only normalize_rms_snr preprocessing)
+    # Matches approach of Encodec, HiFiCodec, Q2D2, SpeechTokenizer
 
     out = state.generator(signal.audio_data, signal.sample_rate)
     recons = AudioSignal(out["audio"], signal.sample_rate)
@@ -645,18 +642,14 @@ def train_loop(state, batch, accel, lambdas):
     transform_args = batch.pop("transform_args", {})
     batch = util.prepare_batch(batch, accel.device)
     
-    # Convert raw tensor batch to AudioSignal for transforms and losses
+    # Convert raw tensor batch to AudioSignal for losses
     # Keep channel dimension: AudioSignal expects [B, C, T] not [B, T]
     audio_tensor = batch["audio"]  # [B, 1, T]
     sample_rate = batch["sample_rate"]
     signal = AudioSignal(audio_tensor, sample_rate)
     
-    with torch.no_grad():
-        # Only pass kwargs if non-empty to avoid KeyError in transform system
-        if transform_args:
-            signal = state.train_data.transform(signal.clone(), **transform_args)
-        else:
-            signal = state.train_data.transform(signal.clone())
+    # No transforms - removed for fair codec comparison (only normalize_rms_snr preprocessing)
+    # Matches approach of Encodec, HiFiCodec, Q2D2, SpeechTokenizer
 
     with accel.autocast():
         out = state.generator(signal.audio_data, signal.sample_rate)
@@ -760,17 +753,14 @@ def save_samples(state, val_idx, writer):
     transform_args = batch.pop("transform_args", {})
     batch = util.prepare_batch(batch, accel.device)
     
-    # Convert raw tensor batch to AudioSignal for transforms and generation
+    # Convert raw tensor batch to AudioSignal for generation
     # Keep channel dimension: AudioSignal expects [B, C, T] not [B, T]
     audio_tensor = batch["audio"]  # [B, 1, T]
     sample_rate = batch["sample_rate"]
     signal = AudioSignal(audio_tensor, sample_rate)
     
-    # Only pass kwargs if non-empty to avoid KeyError in transform system
-    if transform_args:
-        signal = state.train_data.transform(signal.clone(), **transform_args)
-    else:
-        signal = state.train_data.transform(signal.clone())
+    # No transforms - removed for fair codec comparison (only normalize_rms_snr preprocessing)
+    # Matches approach of Encodec, HiFiCodec, Q2D2, SpeechTokenizer
 
     out = state.generator(signal.audio_data, signal.sample_rate)
     recons = AudioSignal(out["audio"], signal.sample_rate)
