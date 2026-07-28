@@ -600,7 +600,8 @@ def val_loop(batch, state, accel):
     batch = util.prepare_batch(batch, accel.device)
     
     # Convert raw tensor batch to AudioSignal for transforms and losses
-    audio_tensor = batch["audio"].squeeze(1)  # [B, 1, T] -> [B, T]
+    # Keep channel dimension: AudioSignal expects [B, C, T] not [B, T]
+    audio_tensor = batch["audio"]  # [B, 1, T]
     sample_rate = batch["sample_rate"]
     signal = AudioSignal(audio_tensor, sample_rate)
     
@@ -645,7 +646,8 @@ def train_loop(state, batch, accel, lambdas):
     batch = util.prepare_batch(batch, accel.device)
     
     # Convert raw tensor batch to AudioSignal for transforms and losses
-    audio_tensor = batch["audio"].squeeze(1)  # [B, 1, T] -> [B, T]
+    # Keep channel dimension: AudioSignal expects [B, C, T] not [B, T]
+    audio_tensor = batch["audio"]  # [B, 1, T]
     sample_rate = batch["sample_rate"]
     signal = AudioSignal(audio_tensor, sample_rate)
     
@@ -759,7 +761,8 @@ def save_samples(state, val_idx, writer):
     batch = util.prepare_batch(batch, accel.device)
     
     # Convert raw tensor batch to AudioSignal for transforms and generation
-    audio_tensor = batch["audio"].squeeze(1)  # [B, 1, T] -> [B, T]
+    # Keep channel dimension: AudioSignal expects [B, C, T] not [B, T]
+    audio_tensor = batch["audio"]  # [B, 1, T]
     sample_rate = batch["sample_rate"]
     signal = AudioSignal(audio_tensor, sample_rate)
     
