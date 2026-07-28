@@ -53,8 +53,7 @@ build_transform.augment_prob: 0.0
 build_transform.augment:
   - Identity
 build_transform.postprocess:
-  - RescaleAudio
-  - ShiftPhase
+  - Identity
 
 # Loss setup
 MultiScaleSTFTLoss.window_lengths: [2048, 512]

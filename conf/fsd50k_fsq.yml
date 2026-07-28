@@ -67,8 +67,7 @@ build_transform.augment_prob: 0.0
 build_transform.augment:
   - Identity
 build_transform.postprocess:
-  - RescaleAudio
-  - ShiftPhase
+  - Identity
 
 # ── Mel loss (multi-scale; null fmax = Nyquist, safe for 24 kHz) ─────────────
 MelSpectrogramLoss.n_mels: [5, 10, 20, 40, 80, 160, 320]
