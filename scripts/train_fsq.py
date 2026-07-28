@@ -45,6 +45,14 @@ if str(_PROJ_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJ_ROOT))
 
 from dataloader_aug.audio_preprocessing import normalize_rms_snr
+from dataloader_aug.dataset_paths import get_dataset_config
+
+# Validate dataset paths on module load
+_dataset_config = get_dataset_config()
+assert _dataset_config.train_csv.exists(), \
+    f"❌ DAC-FSQ training CSV missing: {_dataset_config.train_csv}"
+assert _dataset_config.val_csv.exists(), \
+    f"❌ DAC-FSQ validation CSV missing: {_dataset_config.val_csv}"
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -202,7 +210,9 @@ class SimpleAudioDataset(torch.utils.data.Dataset):
                 y,
                 target_snr_db=40.0,
                 train_mode=self.train,
-                snr_variation_db=5.0
+                snr_variation_db=5.0,
+                audio_path=audio_path,
+                source_identifier="DAC-FSQ/SimpleAudioDataset"
             )
             
             # Resample if needed
