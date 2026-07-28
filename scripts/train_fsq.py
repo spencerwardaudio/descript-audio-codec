@@ -604,6 +604,7 @@ def val_loop(batch, state, accel):
     audio_tensor = batch["audio"]  # [B, 1, T]
     sample_rate = batch["sample_rate"]
     signal = AudioSignal(audio_tensor, sample_rate)
+    signal = signal.to(accel.device)  # Explicit GPU placement after AudioSignal creation
     
     # No transforms - removed for fair codec comparison (only normalize_rms_snr preprocessing)
     # Matches approach of Encodec, HiFiCodec, Q2D2, SpeechTokenizer
@@ -647,6 +648,7 @@ def train_loop(state, batch, accel, lambdas):
     audio_tensor = batch["audio"]  # [B, 1, T]
     sample_rate = batch["sample_rate"]
     signal = AudioSignal(audio_tensor, sample_rate)
+    signal = signal.to(accel.device)  # Explicit GPU placement after AudioSignal creation
     
     # No transforms - removed for fair codec comparison (only normalize_rms_snr preprocessing)
     # Matches approach of Encodec, HiFiCodec, Q2D2, SpeechTokenizer
@@ -758,6 +760,7 @@ def save_samples(state, val_idx, writer):
     audio_tensor = batch["audio"]  # [B, 1, T]
     sample_rate = batch["sample_rate"]
     signal = AudioSignal(audio_tensor, sample_rate)
+    signal = signal.to(accel.device)  # Explicit GPU placement after AudioSignal creation
     
     # No transforms - removed for fair codec comparison (only normalize_rms_snr preprocessing)
     # Matches approach of Encodec, HiFiCodec, Q2D2, SpeechTokenizer
