@@ -167,8 +167,8 @@ class SimpleAudioDataset(torch.utils.data.Dataset):
         self.loudness_cutoff = loudness_cutoff
         self.num_samples = int(duration * sample_rate)
         self.load_count = 0  # Track how many samples loaded
-        if train:
-            np.random.shuffle(self.file_list)
+        # File list order preserved — CSV is pre-shuffled by generate_splits.sh;
+        # DataLoader shuffle=True handles per-epoch randomisation.
         
         print(f"[SimpleAudioDataset] Initialization complete")
         
