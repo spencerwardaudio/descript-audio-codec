@@ -25,6 +25,15 @@ import torch
 import soundfile
 import torchaudio
 import numpy as np
+
+# PyTorch >=2.6 defaults torch.load to weights_only=True, which rejects the
+# defaultdict stored in tracker.pth from our own trusted checkpoints.
+_torch_load = torch.load
+def _torch_load_compat(*args, **kwargs):
+    kwargs.setdefault("weights_only", False)
+    return _torch_load(*args, **kwargs)
+torch.load = _torch_load_compat
+
 from audiotools import AudioSignal
 from audiotools import ml
 from audiotools.core import util
