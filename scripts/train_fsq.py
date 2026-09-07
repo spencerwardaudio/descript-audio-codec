@@ -767,6 +767,21 @@ def checkpoint(state, save_iters, save_path):
             f"{save_path}/{tag}", discriminator_extra
         )
 
+    # Verify the save actually landed on disk before trusting it — silent write
+    # failures here would otherwise go unnoticed for the rest of training.
+    saved = torch.load(
+        f"{save_path}/latest/dac_fsq/tracker.pth", map_location="cpu", weights_only=False
+    )
+    if saved["step"] != state.tracker.step:
+        raise RuntimeError(
+            f"Checkpoint verification failed: disk shows step {saved['step']}, "
+            f"expected {state.tracker.step}"
+        )
+
+    global _wandb_run
+    if _wandb_run is not None:
+        wandb.log({"checkpoint/verified_step": saved["step"]})
+
 
 @torch.no_grad()
 def save_samples(state, val_idx, writer):
