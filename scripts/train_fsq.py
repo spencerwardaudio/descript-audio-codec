@@ -401,6 +401,12 @@ def load(
     generator = DAC_FSQ() if generator is None else generator
     discriminator = Discriminator() if discriminator is None else discriminator
 
+    # Compat shim: checkpoints saved with an older vector_quantize_pytorch lack
+    # attributes (e.g. orthogonal_rotation) added by a newer installed version.
+    for module in generator.modules():
+        if type(module).__name__ == "FSQ" and not hasattr(module, "orthogonal_rotation"):
+            module.orthogonal_rotation = False
+
     tracker.print(generator)
     tracker.print(discriminator)
     
