@@ -402,10 +402,17 @@ def load(
     discriminator = Discriminator() if discriminator is None else discriminator
 
     # Compat shim: checkpoints saved with an older vector_quantize_pytorch lack
-    # attributes (e.g. orthogonal_rotation) added by a newer installed version.
+    # newer feature-toggle attributes; default each to its off/disabled state.
+    _fsq_defaults = {
+        "orthogonal_rotation": False,
+        "bound_hard_clamp": False,
+        "preserve_symmetry": False,
+    }
     for module in generator.modules():
-        if type(module).__name__ == "FSQ" and not hasattr(module, "orthogonal_rotation"):
-            module.orthogonal_rotation = False
+        if type(module).__name__ == "FSQ":
+            for name, default in _fsq_defaults.items():
+                if not hasattr(module, name):
+                    setattr(module, name, default)
 
     tracker.print(generator)
     tracker.print(discriminator)
